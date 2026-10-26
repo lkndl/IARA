@@ -55,24 +55,28 @@ pip install torch torch-geometric prody pandas scipy
 1. Go to our official repository: [https://github.com/leodeals/IARA](https://github.com/leodeals/IARA)
 2. Follow the standard process to download the repository folder (usually clicking the green "Code" button -> "Download ZIP"). Unzip this file in a folder where the script will be stored.  
    **(If you are the type of person with the "barbaric habit" ⚔️🛡️ of keeping absolutely everything on your desktop or the downloads folder, I won't hold this against you).**
-3. Keep the AI brain (`IARA.pth`) securely *inside* that unzipped folder, right next to the file called `predict.py`. Without the brain, the code won't know what to do!
+3. Keep the AI brain (`IARA.pth`) securely *inside* that unzipped folder, in `src/iara/` right next to the file called `predict.py`. Without the brain, the code won't know what to do!
 
 ### 4. Running IARA from the Command Line 🧑‍💻
 You can run IARA directly from your Terminal! This is great if you want to process many structural files at once, or if you're the kind of person who enjoys looking intensely at black screens with scrolling text to impress your lab mates.
 
 1. Make sure your terminal is open and your bubble is active (you should see `(iara_env)` on the left side of the prompt). If not, type `conda activate iara_env`.
 2. Tell your terminal to travel into the IARA folder you just downloaded. For example, if you unzipped it on your Desktop, type `cd Desktop/IARA` and press Enter.
-3. You can process a **single PDB file** or an **entire folder of PDBs at once**!
+3. Install IARA into your bubble once, by typing `pip install -e .` and pressing Enter. This gives you the `iara` command.
+4. You can process a **single PDB file** or an **entire folder of PDBs at once**!
 
 **Example 1: Scoring a Single Protein**
 ```bash
-python predict.py --input target.pdb
+iara --input target.pdb
 
 # Score a full folder and save to a dedicated directory
-python predict.py --input /path/to/my_pdbs/ --outdir predictions/
+iara --input /path/to/my_pdbs/ --outdir predictions/
 
 # Generate extensive patch clustering (JSON + TXT)
-python predict.py --input target.pdb -e
+iara --input target.pdb -e
+
+# Generate a residue score track for the Mol* viewer
+iara --input target.pdb -j
 ```
 
 #### Available Command-Line Arguments
@@ -81,8 +85,9 @@ python predict.py --input target.pdb -e
 |---|---|---|---|
 | `--input`, `-i` | **Required** 🚨 | Target PDB/CIF file, or a folder containing multiple structures (`.pdb`, `.cif`, `.pdb.gz`, `.ent`). | `--input target.pdb`<br>`--input /my_pdbs/` |
 | `--outdir`, `-o` | *Optional* 📁 | Destination directory for output files (default: same folder as input). | `--outdir predictions/` |
-| `--model`, `-m` | *Optional* 🧠 | Custom path to weights file (default: `IARA.pth` next to `predict.py`). | `--model /custom/path/IARA.pth` |
+| `--model`, `-m` | *Optional* 🧠 | Custom path to weights file (default: the bundled `IARA.pth`). | `--model /custom/path/IARA.pth` |
 | `-e`, `--extensive` | *Optional* 🧬 | Spatial clustering of hot residues into discrete patches (`_patches.json` and `_patches.txt`). | `-e` |
+| `-j`, `--json-track` | *Optional* 🎯 | Residue score track JSON for the Mol* viewer (`_IARA_track.json`). | `-j` |
 | `-t`, `--threshold` | *Optional* 🎚️ | Minimum IARA score (0–100) to classify a residue as 'hot' for patch extraction (default: `60.0`). | `-t 70` |
 | `-d`, `--distance` | *Optional* 📏 | Maximum CA–CA distance in Å to connect residues into the same patch (default: `5.0`). | `-d 8.0` |
 | `-s`, `--min-size` | *Optional* 🧩 | Minimum number of contiguous residues required to form a valid patch (default: `3`). | `-s 5` |
@@ -128,34 +133,44 @@ If you ran the command-line script from Step 4 and got back a `_IARA.pdb` file, 
 ```bash
 git clone https://github.com/leodeals/IARA
 cd IARA
+uv run iara --input target.pdb
+```
+`uv` installs the package and its dependencies on first run; the `iara` command is also available after `pip install -e .` in any environment.
+
+Or, with Conda:
+
+```bash
+git clone https://github.com/leodeals/IARA
+cd IARA
 conda env create -f environment.yml
 conda activate iara_env
+pip install -e .
 ```
-Ensure you have the model weights (`IARA.pth`) in the repository root next to `predict.py`.
+Ensure you have the model weights (`IARA.pth`) in `src/iara/`, next to `predict.py`.
 
 *(Note: The environment file leaves the CUDA version unpinned so Conda can detect your hardware automatically. If installation fails, you can explicitly set your local CUDA version inside `environment.yml`)*
 
 **Minimal Call (recommended)**
 ```bash
 # --model and --outdir are optional:
-# model defaults to IARA.pth next to predict.py
+# model defaults to the bundled IARA.pth
 # output defaults to the same folder as the input
-python predict.py --input target.pdb
+iara --input target.pdb
 ```
 
 **Single Structure — custom output folder**
 ```bash
-python predict.py --input target.pdb --outdir predictions/
+iara --input target.pdb --outdir predictions/
 ```
 
 **Batch Directory**
 ```bash
-python predict.py --input /path/to/pdbs/ --outdir predictions/
+iara --input /path/to/pdbs/ --outdir predictions/
 ```
 
 **Extensive Patch Clustering**
 ```bash
-python predict.py --input target.pdb -e -t 60 -d 5.0 -s 3
+iara --input target.pdb -e -t 60 -d 5.0 -s 3
 ```
 
 ### GUI Plugin Installation
@@ -213,6 +228,37 @@ When using `-e`, connected hot residues are clustered into discrete spatial patc
   ]
 }
 ```
+
+### 4. `target_IARA_track.json` (Residue Score Track, `-j`)
+A residue score track following the af-molstar-viewer schema (version 1): one
+score per residue, kept separate from the coordinates so the viewer can load the
+structure once and colour it by any number of tracks. Residue numbering is
+**author numbering** (`auth_asym_id` / `auth_seq_id`), as declared by `"index"`.
+
+```json
+{
+  "schema_version": 1,
+  "id": "iara-target",
+  "label": "IARA interface score",
+  "index": "auth",
+  "scale": { "kind": "sequential", "domain": [0.0, 100.0] },
+  "provenance": {
+    "tool": "iara",
+    "tool_version": "0.1.0",
+    "created": "2026-10-24T14:02:11Z",
+    "source_structure": "target.pdb",
+    "parameters": { "edge_distance_threshold_A": 10.0, "smoothing_radius_A": 8.0 }
+  },
+  "values": [
+    { "chain": "A", "seq": 12, "value": 84.6 },
+    { "chain": "A", "seq": 13, "value": 91.2 }
+  ]
+}
+```
+
+Only residues with a scored C-alpha appear; unscored residues are omitted rather
+than written as `0`. The `domain` is the fixed `0–100` IARA range, not the
+observed range, so tracks from different structures stay comparable.
 
 ### Score Interpretation Guidelines
 

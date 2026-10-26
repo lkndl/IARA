@@ -5,9 +5,11 @@ import glob
 import argparse
 import warnings
 import json
+import re
 import torch
 import torch.nn as nn
 import numpy as np
+from datetime import datetime, timezone
 from pathlib import Path
 from scipy.spatial import cKDTree
 from prody import parsePDB, writePDB, confProDy
@@ -120,7 +122,59 @@ def extract_patches(ca_atoms, probs, threshold=0.60, distance=8.0, min_size=3):
         patches.sort(key=lambda p: probs[p[0]], reverse=True)
     return patches
 
-def score_structure(input_file, model, device, output_dir, extensive=False, threshold=60.0, distance=5.0, min_size=3):
+def write_score_track(input_file, ca_atoms, probs, output_dir):
+    """
+    Writes a residue score track: one IARA score per residue, kept separate from
+    the coordinates, following the af-molstar-viewer residue-score-track schema
+    (version 1). Returns the path written.
+    """
+    try:
+        from importlib.metadata import version
+        tool_version = version("iara")
+    except Exception:
+        tool_version = "unknown"
+
+    file_path = Path(input_file)
+
+    # One entry per scored residue, in author numbering (what ProDy reports)
+    values, seen, dupes = [], set(), 0
+    for i, p in enumerate(probs):
+        atom = ca_atoms[i]
+        key = (atom.getChid(), int(atom.getResnum()), atom.getIcode())
+        if key in seen:
+            dupes += 1
+            continue
+        seen.add(key)
+        entry = {"chain": key[0], "seq": key[1], "value": round(float(p) * 100.0, 1)}
+        if key[2]:
+            entry["ins_code"] = key[2]
+        values.append(entry)
+
+    if dupes:
+        print(f"   \u26a0\ufe0f  Dropped {dupes} duplicate residue(s) from the score track of {file_path.name}.")
+
+    track = {
+        "schema_version": 1,
+        "id": f"iara-{re.sub(r'[^a-z0-9]+', '-', file_path.stem.lower()).strip('-')}",
+        "label": "IARA interface score",
+        "index": "auth",
+        "scale": {"kind": "sequential", "domain": [0.0, 100.0]},
+        "provenance": {
+            "tool": "iara",
+            "tool_version": tool_version,
+            "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "source_structure": file_path.name,
+            "parameters": {"edge_distance_threshold_A": 10.0, "smoothing_radius_A": 8.0},
+        },
+        "values": values,
+    }
+
+    out_path = os.path.join(output_dir, f"{file_path.stem}_IARA_track.json")
+    with open(out_path, "w") as f:
+        json.dump(track, f, indent=2)
+    return out_path
+
+def score_structure(input_file, model, device, output_dir, extensive=False, threshold=60.0, distance=5.0, min_size=3, json_track=False):
     try:
         struct = parsePDB(input_file)
         if struct is None:
@@ -188,6 +242,11 @@ def score_structure(input_file, model, device, output_dir, extensive=False, thre
             
         print(f"   ✅ Scored {file_path.name} -> Saved to {out_path} and {json_all_out}")
 
+        # Residue score track for af-molstar-viewer
+        if json_track:
+            track_out = write_score_track(input_file, ca_atoms, smooth_p, output_dir)
+            print(f"   🎯 Generated score track: {track_out}")
+
         # Generate extensive JSON/TXT outputs if flag is set
         if extensive:
             patches = extract_patches(ca_atoms, smooth_p, threshold=threshold/100.0, distance=distance, min_size=min_size)
@@ -245,6 +304,7 @@ def main():
     parser.add_argument("-o", "--outdir", default=None, help="Output directory to save scored PDBs (default: same folder as input)")
     parser.add_argument("-m", "--model", default=_DEFAULT_MODEL, help=f"Path to IARA.pth weights (default: {_DEFAULT_MODEL})")
     parser.add_argument("-e", "--extensive", action="store_true", help="Generate extensive outputs: grouping hot residues into patches and saving as JSON and TXT")
+    parser.add_argument("-j", "--json-track", action="store_true", help="Generate a residue score track JSON (af-molstar-viewer schema v1) as <name>_IARA_track.json")
     parser.add_argument("-t", "--threshold", type=float, default=60.0, help="IARA score threshold for a residue to be considered hot (default: 60)")
     parser.add_argument("-d", "--distance", type=float, default=5.0, help="Maximum CA-CA distance (in A) to group residues into the same patch (default: 5.0)")
     parser.add_argument("-s", "--min-size", type=int, default=3, help="Minimum number of residues required to form a patch (default: 3)")
@@ -298,7 +358,7 @@ def main():
     
     # 4. Process Inputs
     for file_path in files_to_process:
-        score_structure(file_path, model, device, args.outdir, extensive=args.extensive, threshold=args.threshold, distance=args.distance, min_size=args.min_size)
+        score_structure(file_path, model, device, args.outdir, extensive=args.extensive, threshold=args.threshold, distance=args.distance, min_size=args.min_size, json_track=args.json_track)
 
     print(f"\n✨ Complete! All predicted structures saved to '{args.outdir}/'.")
     print("🎨 Use spectrum b, blue_white_red, maximum=100, minimum=0 to visualize the hotspots in pymol!")
