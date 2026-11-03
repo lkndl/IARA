@@ -95,19 +95,21 @@ iara --input target.pdb -j
 ### 5. Installing the PyMOL or ChimeraX Plugins 🎨
 If you prefer visual tools instead of the command line, we can connect IARA seamlessly to the 3D software you already know and love!
 
+The plugins run the `iara` command you installed in Step 4, so do that first.
+
 **For PyMOL:**
 1. Open PyMOL normally.
 2. In PyMOL's command line box (at the top or bottom of the screen), type `run ` and then drag-and-drop the `iara_plugin_pymol.py` file from your unzipped folder into the PyMOL window to auto-fill the path, like this:  
    `run /Users/yourname/Desktop/IARA/PyMOL/iara_plugin_pymol.py` and press Enter.
-3. Tell the plugin where the AI brain is located by typing `iara_configure ` and dragging your main unzipped `IARA` folder into PyMOL:  
-   `iara_configure /Users/yourname/Desktop/IARA` and press Enter.
+3. Only if the plugin says it cannot find the `iara` command: tell it where it is. In your terminal (with `(iara_env)` active), type `which iara` (Windows: `where iara`), then pass what it prints to `iara_configure`:  
+   `iara_configure /Users/yourname/miniconda3/envs/iara_env/bin/iara` and press Enter.
 
 **For UCSF ChimeraX:**
 1. Open ChimeraX.
 2. In the ChimeraX command line prompt at the bottom, type `open ` and drag-and-drop the `iara_plugin_chimerax.py` file:  
    `open /Users/yourname/Desktop/IARA/ChimeraX/iara_plugin_chimerax.py`
-3. Tell the plugin where the AI brain is located by typing `iara_configure ` and dragging your main unzipped `IARA` folder into ChimeraX:  
-   `iara_configure /Users/yourname/Desktop/IARA`
+3. Only if the plugin says it cannot find the `iara` command: tell it where it is, the same way as for PyMOL:  
+   `iara_configure /Users/yourname/miniconda3/envs/iara_env/bin/iara`
 
 *(We permanently save this configuration setting on your computer, so when you restart your computer, you only ever need to do step #2!)*
 
@@ -183,16 +185,16 @@ iara --input target.pdb -e -t 60 -d 5.0 -s 3
 
 ### GUI Plugin Installation
 
-Make sure your Conda environment is named `iara_env`, or see the override below.
+The plugins run the `iara` command. They look for it on the `PATH` and in `~/.local/bin`, where `uv tool install` puts it.
 
 - **PyMOL:** `run /path/to/IARA/PyMOL/iara_plugin_pymol.py`
 - **ChimeraX:** `open /path/to/IARA/ChimeraX/iara_plugin_chimerax.py`
 
-**Configuration (Run Once):**
+**Configuration (only if `iara` is elsewhere, run once):**
 ```bash
-iara_configure /path/to/IARA
+iara_configure /path/to/iara
 ```
-*(Optional) If your Conda environment is named something else, pass the override:* `iara_env_name custom_env_name`
+The path can also be the folder holding the command, such as the `bin` folder of a Conda environment.
 
 **Running Predictions:**
 - **PyMOL:** `iara_predict <object_name>`

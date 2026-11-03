@@ -1,12 +1,23 @@
 import os
-import sys
+import shutil
 import tempfile
+import subprocess
 from pymol import cmd
 
 # -----------------------------------------------------------------------------
 # IARA: Interface Analysis and Recognition Architecture
 # PyMOL Plugin
 # -----------------------------------------------------------------------------
+
+# Where iara_configure saves the path of the iara command
+CONFIG_FILE = os.path.expanduser("~/.iara_command.txt")
+
+def find_iara():
+    """The iara command: the configured one, else the one on the PATH, else the one in ~/.local/bin."""
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r") as f:
+            return f.read().strip()
+    return shutil.which("iara") or shutil.which("iara", path=os.path.join(os.path.expanduser("~"), ".local", "bin"))
 
 def iara_predict(*args, **kwargs):
     # PyMOL splits arguments by comma, so we join them back together for complex selections
@@ -30,33 +41,16 @@ def iara_predict(*args, **kwargs):
     print(f"\n🌊 IARA Inference (Interface Analysis and Recognition Architecture) 🌊")
     print(f"Targeting selection: {selection}")
     
-    # Check if we have python packages we need. PyMOL ships with its own python.
-    # Users will need to install torch, torch_geometric, and prody into PyMOL's python environment
-    # or point this plugin to their external executable. 
-    # For this elegant plugin, we assume they have the GitHub CLI version installed and we 
-    # will call it as an external process to avoid corrupting PyMOL's internal conda env.
-    
-    # Read the permanent configuration file
-    config_file = os.path.expanduser("~/.iara_config.txt")
-    
-    if not os.path.exists(config_file):
-        print("❌ Error: IARA installation path not configured.")
-        print("Please tell PyMOL where you extracted the IARA GitHub folder by typing this into the PyMOL console:")
-        print("    iara_configure /absolute/path/to/extracted/IARA/folder")
+    # PyMOL ships with its own python, so IARA runs as the separately installed iara command
+    iara = find_iara()
+
+    if iara is None:
+        print("❌ Error: The iara command was not found.")
+        print("Install it with 'uv tool install git+https://github.com/lkndl/IARA',")
+        print("or tell PyMOL where it is by typing this into the PyMOL console:")
+        print("    iara_configure /absolute/path/to/iara")
         return
-        
-    with open(config_file, "r") as f:
-        PLUGIN_DIR = f.read().strip()
-        
-    IARA_SCRIPT = os.path.join(PLUGIN_DIR, "predict.py")
-    IARA_MODEL = os.path.join(PLUGIN_DIR, "IARA.pth")
-    
-    if not os.path.exists(IARA_SCRIPT) or not os.path.exists(IARA_MODEL):
-        print("❌ Error: IARA predict.py or model weights not found.")
-        print(f"IARA is currently configured to look in: {PLUGIN_DIR}")
-        print("Please ensure both files are there, or re-run 'iara_configure' with the correct path.")
-        return
-        
+
     temp_dir = tempfile.mkdtemp()
     temp_pdb = os.path.join(temp_dir, "temp_target.pdb")
     
@@ -68,43 +62,21 @@ def iara_predict(*args, **kwargs):
         return
         
     print(f"🏃 Running IARA Neural Network...")
-    
-    import subprocess
-    import sys
-    
-    # -------------------------------------------------------------------------
-    # Cross-Platform Conda Execution
-    # PyMOL hijacks the 'python' command. We must force it to use the user's Conda.
-    # -------------------------------------------------------------------------
-    
-    # Check if user specified a custom conda environment name, otherwise default to iara_env
-    env_config_file = os.path.expanduser("~/.iara_env_config.txt")
-    conda_env = "iara_env"
-    if os.path.exists(env_config_file):
-        with open(env_config_file, "r") as f:
-            conda_env = f.read().strip()
-            
-    if os.name == 'nt':  # Windows
-        # Windows requires routing through cmd.exe to pick up conda hooks
-        command = ["cmd.exe", "/c", f"conda run -n {conda_env} python {IARA_SCRIPT} --model {IARA_MODEL} --input {temp_pdb} --outdir {temp_dir}"]
-    else:  # Mac / Linux
-        # Unix requires a login shell to source ~/.bashrc or ~/.zshrc
-        command = ["bash", "-l", "-c", f"conda run -n {conda_env} python {IARA_SCRIPT} --model {IARA_MODEL} --input {temp_pdb} --outdir {temp_dir}"]
-    
+
     try:
         # Capture the output so we can show EXACTLY why it failed in the PyMOL console
-        result = subprocess.run(command, capture_output=True, text=True)
+        result = subprocess.run([iara, "--input", temp_pdb, "--outdir", temp_dir],
+                                capture_output=True, text=True, encoding="utf-8", errors="replace")
         if result.returncode != 0:
             print("❌ IARA Inference Failed! Backend Error Traceback:")
             print("-" * 50)
             print(result.stdout)
             print(result.stderr)
             print("-" * 50)
-            print("Troubleshooting: Does 'python' in your current terminal have torch, torch_geometric, and prody installed?")
-            print("Try running PyMOL from the same Conda environment where you installed IARA.")
+            print(f"Troubleshooting: does '{iara} --help' run in a terminal?")
             return
     except Exception as e:
-        print(f"❌ Failed to launch backend script: {e}")
+        print(f"❌ Failed to launch {iara}: {e}")
         return
         
     # The script names the output <stem>_IARA.pdb
@@ -159,55 +131,31 @@ cmd.auto_arg[0]['iara_predict'] = [cmd.object_sc, 'object', '']
 def iara_configure(installation_path, **kwargs):
     """
     DESCRIPTION
-    
-        Configures the IARA plugin with the absolute path to your downloaded GitHub folder.
-        
+
+        Configures the IARA plugin with the path to the iara command, or to its folder.
+
     USAGE
-    
+
         iara_configure [path]
     """
-    config_file = os.path.expanduser("~/.iara_config.txt")
-    
     # Clean up the path
     clean_path = os.path.expanduser(installation_path.strip(" '\""))
-    
-    # Verify it looks correct
-    if not os.path.exists(os.path.join(clean_path, "predict.py")) or not os.path.exists(os.path.join(clean_path, "IARA.pth")):
-        print(f"⚠️ Warning: Could not find predict.py or IARA.pth inside {clean_path}")
-        print("Please make sure you point directly to the extracted IARA folder containing those files.")
-        
+
+    # Accept the folder that holds the command, e.g. the bin folder of an environment
+    if os.path.isdir(clean_path):
+        clean_path = shutil.which("iara", path=clean_path) or clean_path
+    if not os.path.isfile(clean_path):
+        print(f"⚠️ Warning: Could not find the iara command at {clean_path}")
+
     try:
-        with open(config_file, "w") as f:
+        with open(CONFIG_FILE, "w") as f:
             f.write(clean_path)
-        print(f"✅ IARA configured successfully! Path saved to {config_file}")
+        print(f"✅ IARA configured successfully! Path saved to {CONFIG_FILE}")
         print("You can now run 'iara_predict' on any loaded structure.")
     except Exception as e:
         print(f"❌ Error saving configuration: {e}")
 
 cmd.extend("iara_configure", iara_configure)
-
-
-def iara_env_name(env_name):
-    """
-    DESCRIPTION
-    
-        Overrides the default Conda environment name ('iara_env') used by the plugin.
-        
-    USAGE
-    
-        iara_env_name [my_custom_env]
-    """
-    env_config_file = os.path.expanduser("~/.iara_env_config.txt")
-    clean_env = env_name.strip(" '\"")
-    
-    try:
-        with open(env_config_file, "w") as f:
-            f.write(clean_env)
-        print(f"✅ IARA Conda environment set to '{clean_env}'")
-    except Exception as e:
-        print(f"❌ Error saving environment configuration: {e}")
-
-cmd.extend("iara_env_name", iara_env_name)
 
 
 # Optional: Add it to the GUI menu (Requires Tkinter which PyMOL usually has)
