@@ -1,23 +1,28 @@
 import os
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'  # Prevents macOS OpenMP duplicate-runtime abort
 import sys
 import glob
 import argparse
 import warnings
 import json
-import re
 import torch
 import torch.nn as nn
 import numpy as np
+import gemmi
+from collections import namedtuple
 from datetime import datetime, timezone
 from pathlib import Path
 from scipy.spatial import cKDTree
-from prody import parsePDB, writePDB, confProDy
 from torch_geometric.nn import GATv2Conv
 from torch_geometric.data import Data
 
 warnings.filterwarnings('ignore')
-confProDy(verbosity='none')
+
+# --- SCORING PARAMETERS (also reported in the score track provenance) ---
+EDGE_DISTANCE_A = 10.0    # CA-CA distance that connects two residues in the graph
+SMOOTHING_RADIUS_A = 8.0  # radius over which the raw predictions are averaged
+
+# Stable score track ID, the same for every structure
+TRACK_ID = "iara-interface"
 
 # --- AA LOOKUPS ---
 MAX_SASA = {'ALA':129,'ARG':274,'ASN':195,'ASP':193,'CYS':167,'GLN':225,'GLU':223,'GLY':104,'HIS':224,'ILE':197,'LEU':201,'LYS':236,'MET':224,'PHE':240,'PRO':159,'SER':155,'THR':172,'TRP':285,'TYR':263,'VAL':174}
@@ -40,16 +45,15 @@ class BindGNN(nn.Module):
         return self.out(x)
 
 # --- INFERENCE HELPERS ---
-def extract_features(ca_atoms, coords, distance_threshold=10.0):
+def extract_features(resnames, coords, distance_threshold=EDGE_DISTANCE_A):
     tree = cKDTree(coords)
     dist_m = np.linalg.norm(coords[:, None] - coords[None, :], axis=2)
     dens8 = np.sum(dist_m < 8.0, axis=1) - 1
     dens15 = np.sum(dist_m < 15.0, axis=1) - 1
-    charges = [AA_PROPS.get(a.getResname(), {'c': 0})['c'] for a in ca_atoms]
-    
+    charges = [AA_PROPS.get(res, {'c': 0})['c'] for res in resnames]
+
     x_list = []
-    for i, atom in enumerate(ca_atoms):
-        res = atom.getResname()
+    for i, res in enumerate(resnames):
         sasa_p = (1.0 - (dens8[i]/15.0)) * 100.0
         rsasa = sasa_p / MAX_SASA.get(res, 1.0)
         p = AA_PROPS.get(res, {'h':0,'c':0})
@@ -64,7 +68,7 @@ def extract_features(ca_atoms, coords, distance_threshold=10.0):
     ei = torch.cat([ei, ei.flip(0)], dim=1)
     return torch.tensor(x_list, dtype=torch.float), ei
 
-def smooth_predictions(coords, probs, radius=8.0):
+def smooth_predictions(coords, probs, radius=SMOOTHING_RADIUS_A):
     tree = cKDTree(coords)
     smoothed = np.zeros_like(probs)
     for i in range(len(probs)):
@@ -72,16 +76,15 @@ def smooth_predictions(coords, probs, radius=8.0):
         smoothed[i] = (probs[i] + np.mean(probs[nb])) / 2.0
     return smoothed
 
-def extract_patches(ca_atoms, probs, threshold=0.60, distance=8.0, min_size=3):
+def extract_patches(coords, probs, threshold=0.60, distance=8.0, min_size=3):
     """
     Extracts spatial patches of residues with IARA scores > threshold.
-    Returns a list of patches, where each patch is a list of atom indices.
+    Returns a list of patches, where each patch is a list of residue indices.
     """
     hot_indices = [i for i, p in enumerate(probs) if p > threshold]
     if not hot_indices:
         return []
-        
-    coords = ca_atoms.getCoords()
+
     hot_coords = coords[hot_indices]
     
     # Build tree for just the hot residues
@@ -122,7 +125,58 @@ def extract_patches(ca_atoms, probs, threshold=0.60, distance=8.0, min_size=3):
         patches.sort(key=lambda p: probs[p[0]], reverse=True)
     return patches
 
-def write_score_track(input_file, ca_atoms, probs, output_dir):
+def output_stem(input_file):
+    """The input file name without its extension, including a .gz: x.pdb.gz -> x."""
+    path = Path(input_file)
+    return Path(path.stem).stem if path.suffix.lower() == ".gz" else path.stem
+
+# One scored residue by author IDs, and its (chain, residue) position in the first model
+Residue = namedtuple("Residue", "chain resnum icode resname location")
+
+def read_structure(input_file):
+    """Reads a PDB or mmCIF file; returns it, its protein residues with a C-alpha, and their coordinates."""
+    struct = gemmi.read_structure(str(input_file))
+    struct.remove_alternative_conformations()
+
+    residues, coords = [], []
+    if len(struct) == 0:
+        return struct, residues, np.zeros((0, 3))
+    for cid, chain in enumerate(struct[0]):
+        for rid, residue in enumerate(chain):
+            info = gemmi.find_tabulated_residue(residue.name)
+            if info is None or not info.is_amino_acid():
+                continue
+            ca = residue.find_atom("CA", "*")
+            if ca is None:
+                continue
+            residues.append(Residue(chain.name, residue.seqid.num, residue.seqid.icode.strip(), residue.name, (cid, rid)))
+            coords.append([ca.pos.x, ca.pos.y, ca.pos.z])
+    return struct, residues, np.array(coords).reshape(-1, 3)
+
+def write_scored_structure(struct, residues, probs, out_path):
+    """Writes the structure as PDB, with the scores (0-100) as B-factors and 0 for unscored atoms."""
+    by_location = {r.location: p for r, p in zip(residues, probs)}
+    by_key = {}
+    for r, p in zip(residues, probs):
+        by_key.setdefault((r.chain, r.resnum, r.icode), p)
+
+    for mid, model in enumerate(struct):
+        for cid, chain in enumerate(model):
+            for rid, residue in enumerate(chain):
+                # The first model was scored; further models of an ensemble take the scores of the same residue
+                if mid == 0:
+                    p = by_location.get((cid, rid))
+                else:
+                    p = by_key.get((chain.name, residue.seqid.num, residue.seqid.icode.strip()))
+                for atom in residue:
+                    atom.b_iso = 0.0 if p is None else float(p) * 100.0
+
+    # The PDB format has room for two characters of chain name only
+    if any(len(chain.name) > 2 for chain in struct[0]):
+        struct.shorten_chain_names()
+    struct.write_pdb(out_path)
+
+def write_score_track(input_file, residues, probs, output_dir):
     """
     Writes a residue score track: one IARA score per residue, kept separate from
     the coordinates, following the af-molstar-viewer residue-score-track schema
@@ -136,11 +190,10 @@ def write_score_track(input_file, ca_atoms, probs, output_dir):
 
     file_path = Path(input_file)
 
-    # One entry per scored residue, in author numbering (what ProDy reports)
+    # One entry per scored residue, in author numbering
     values, seen, dupes = [], set(), 0
-    for i, p in enumerate(probs):
-        atom = ca_atoms[i]
-        key = (atom.getChid(), int(atom.getResnum()), atom.getIcode())
+    for r, p in zip(residues, probs):
+        key = (r.chain, r.resnum, r.icode)
         if key in seen:
             dupes += 1
             continue
@@ -155,43 +208,44 @@ def write_score_track(input_file, ca_atoms, probs, output_dir):
 
     track = {
         "schema_version": 1,
-        "id": f"iara-{re.sub(r'[^a-z0-9]+', '-', file_path.stem.lower()).strip('-')}",
+        "id": TRACK_ID,
         "label": "IARA interface score",
         "index": "auth",
         "scale": {"kind": "sequential", "domain": [0.0, 100.0]},
+        "palette": {"name": "purples"},
         "provenance": {
             "tool": "iara",
             "tool_version": tool_version,
             "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "source_structure": file_path.name,
-            "parameters": {"edge_distance_threshold_A": 10.0, "smoothing_radius_A": 8.0},
+            "parameters": {"edge_distance_threshold_A": EDGE_DISTANCE_A, "smoothing_radius_A": SMOOTHING_RADIUS_A},
         },
         "values": values,
     }
 
-    out_path = os.path.join(output_dir, f"{file_path.stem}_IARA_track.json")
+    out_path = os.path.join(output_dir, f"{output_stem(input_file)}_IARA_track.json")
     with open(out_path, "w") as f:
         json.dump(track, f, indent=2)
     return out_path
 
 def score_structure(input_file, model, device, output_dir, extensive=False, threshold=60.0, distance=5.0, min_size=3, json_track=False):
+    """Scores one structure and writes its outputs. Returns whether it succeeded."""
     try:
-        struct = parsePDB(input_file)
-        if struct is None:
-            print(f"   ⚠️  Failed to parse {input_file}, skipping.")
-            return
+        try:
+            struct, residues, coords = read_structure(input_file)
+        except Exception as e:
+            print(f"   ❌ Failed to parse {input_file}: {e}")
+            return False
 
-        ca_atoms = struct.select('name CA and protein')
-        if ca_atoms is None or len(ca_atoms) < 20:
-            print(f"   ⚠️  Not enough CA atoms found in {input_file}, skipping.")
-            return
+        if len(residues) < 20:
+            print(f"   ❌ Not enough CA atoms found in {input_file} ({len(residues)}, need 20).")
+            return False
 
-        coords = ca_atoms.getCoords()
-        x, ei = extract_features(ca_atoms, coords)
-        
+        x, ei = extract_features([r.resname for r in residues], coords)
+
         if x is None:
-            print(f"   ⚠️  Failed to extract structural features for {input_file}, skipping.")
-            return
+            print(f"   ❌ Failed to extract structural features for {input_file}.")
+            return False
 
         x_tensor = x.to(device)
         ei_tensor = ei.to(device)
@@ -202,31 +256,20 @@ def score_structure(input_file, model, device, output_dir, extensive=False, thre
 
         smooth_p = smooth_predictions(coords, raw_probs)
 
-        # Clear existing B-factors and replace with probabilities scaled (0-100)
-        sv = struct.copy()
-        sv.setBetas(0)
-
-        for i, p in enumerate(smooth_p):
-            sel = sv.select(f"resindex {ca_atoms[i].getResindex()}")
-            if sel: 
-                sel.setBetas(float(p) * 100.0)
-
         # Build output filename
         file_path = Path(input_file)
-        out_name = f"{file_path.stem}_IARA.pdb"
+        stem = output_stem(input_file)
+        out_name = f"{stem}_IARA.pdb"
         out_path = os.path.join(output_dir, out_name)
 
-        writePDB(out_path, sv)
-        
+        # Replace the B-factors with the probabilities scaled (0-100)
+        write_scored_structure(struct, residues, smooth_p, out_path)
+
         # --- Export ALL predictions to JSON (custom single-line formatting for readability) ---
         all_preds = []
-        for i, p in enumerate(smooth_p):
-            atom = ca_atoms[i]
-            ch = atom.getChid()
-            resnum = atom.getResnum()
-            resname = atom.getResname()
+        for r, p in zip(residues, smooth_p):
             score = float(p * 100.0)
-            all_preds.append({"residue": f"{ch}{resnum}", "resname": resname, "score": round(score, 1)})
+            all_preds.append({"residue": f"{r.chain}{r.resnum}", "resname": r.resname, "score": round(score, 1)})
             
         json_lines = ["{", f'  "target_file": "{file_path.name}",', '  "predictions": [']
         pred_strs = []
@@ -236,7 +279,7 @@ def score_structure(input_file, model, device, output_dir, extensive=False, thre
         json_lines.append("  ]")
         json_lines.append("}")
         
-        json_all_out = os.path.join(output_dir, f"{file_path.stem}_IARA.json")
+        json_all_out = os.path.join(output_dir, f"{stem}_IARA.json")
         with open(json_all_out, "w") as f:
             f.write("\n".join(json_lines))
             
@@ -244,15 +287,15 @@ def score_structure(input_file, model, device, output_dir, extensive=False, thre
 
         # Residue score track for af-molstar-viewer
         if json_track:
-            track_out = write_score_track(input_file, ca_atoms, smooth_p, output_dir)
+            track_out = write_score_track(input_file, residues, smooth_p, output_dir)
             print(f"   🎯 Generated score track: {track_out}")
 
         # Generate extensive JSON/TXT outputs if flag is set
         if extensive:
-            patches = extract_patches(ca_atoms, smooth_p, threshold=threshold/100.0, distance=distance, min_size=min_size)
+            patches = extract_patches(coords, smooth_p, threshold=threshold/100.0, distance=distance, min_size=min_size)
             if not patches:
-                print(f"   ℹ️  No hot patches found for {file_path.name} (>60 score).")
-                return
+                print(f"   ℹ️  No hot patches found for {file_path.name} (>{threshold:g} score).")
+                return True
 
             json_data = {}
             txt_lines = []
@@ -263,42 +306,51 @@ def score_structure(input_file, model, device, output_dir, extensive=False, thre
                 patch_data = []
                 
                 for idx in patch_atoms:
-                    atom = ca_atoms[idx]
-                    ch = atom.getChid()
-                    resnum = atom.getResnum()
-                    resname = atom.getResname()
+                    r = residues[idx]
                     score = float(smooth_p[idx] * 100.0)
-                    
+
                     patch_data.append({
-                        "residue": f"{ch}{resnum}",
-                        "resname": resname,
+                        "residue": f"{r.chain}{r.resnum}",
+                        "resname": r.resname,
                         "score": round(score, 1)
                     })
-                    txt_lines.append(f"{ch}{resnum} {resname} {round(score, 1)}")
+                    txt_lines.append(f"{r.chain}{r.resnum} {r.resname} {round(score, 1)}")
                     
                 json_data[patch_name.lower().replace(' ', '_')] = patch_data
                 txt_lines.append("") # Empty line between patches
                 
             # Write JSON
-            json_out = os.path.join(output_dir, f"{file_path.stem}_IARA_patches.json")
+            json_out = os.path.join(output_dir, f"{stem}_IARA_patches.json")
             with open(json_out, "w") as f:
                 json.dump(json_data, f, indent=2)
                 
             # Write TXT
-            txt_out = os.path.join(output_dir, f"{file_path.stem}_IARA_patches.txt")
+            txt_out = os.path.join(output_dir, f"{stem}_IARA_patches.txt")
             with open(txt_out, "w") as f:
                 f.write("\n".join(txt_lines).strip())
                 
             print(f"   📄 Generated patch files: {json_out} and {txt_out}")
 
+        return True
+
     except Exception as e:
         print(f"   ❌ Error processing {input_file}: {e}")
+        return False
 
 # --- MAIN RUNNER ---
 # Default model path: IARA.pth living next to this script
 _DEFAULT_MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "IARA.pth")
 
 def main():
+    # torch and the BLAS libraries may each bring an OpenMP runtime, which macOS aborts on
+    if sys.platform == "darwin":
+        os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'TRUE')
+
+    # Windows writes to pipes in the ANSI code page, which has no emoji
+    if sys.platform == "win32":
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+
     parser = argparse.ArgumentParser(description="IARA Inference Tool - Interface Analysis and Recognition Architecture")
     parser.add_argument("-i", "--input", required=True, help="Input directory OR a single .pdb / .cif file")
     parser.add_argument("-o", "--outdir", default=None, help="Output directory to save scored PDBs (default: same folder as input)")
@@ -346,6 +398,12 @@ def main():
         files_to_process.extend(glob.glob(os.path.join(args.input, "*.cif")))
         files_to_process.extend(glob.glob(os.path.join(args.input, "*.pdb.gz")))
         files_to_process.extend(glob.glob(os.path.join(args.input, "*.ent")))
+
+        # The scored PDBs are written there too, and the next run takes them as input
+        if input_path.resolve() == Path(args.outdir).resolve():
+            print(f"⚠️  The output directory is the input directory {args.input}. "
+                  "A later run on it also scores the *_IARA.pdb files written now, "
+                  "as *_IARA_IARA.pdb. Pass --outdir to keep them apart.\n")
     else:
         print(f"❌ Error: Invalid input path {args.input}")
         sys.exit(1)
@@ -356,9 +414,15 @@ def main():
 
     print(f"🚀 Processing {len(files_to_process)} structure(s)...\n")
     
-    # 4. Process Inputs
-    for file_path in files_to_process:
-        score_structure(file_path, model, device, args.outdir, extensive=args.extensive, threshold=args.threshold, distance=args.distance, min_size=args.min_size, json_track=args.json_track)
+    # 4. Process Inputs, carrying on past failures
+    failed = [file_path for file_path in files_to_process
+              if not score_structure(file_path, model, device, args.outdir, extensive=args.extensive, threshold=args.threshold, distance=args.distance, min_size=args.min_size, json_track=args.json_track)]
+
+    if failed:
+        print(f"\n❌ {len(failed)} of {len(files_to_process)} structure(s) failed:")
+        for file_path in failed:
+            print(f"   {file_path}")
+        sys.exit(1)
 
     print(f"\n✨ Complete! All predicted structures saved to '{args.outdir}/'.")
     print("🎨 Use spectrum b, blue_white_red, maximum=100, minimum=0 to visualize the hotspots in pymol!")

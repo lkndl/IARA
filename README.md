@@ -37,7 +37,7 @@ If it says "command not found", don't worry! You just need to install Miniconda:
 ### 2. Creating Your IARA Environment
 Now that you have Conda installed, let's create that safe "bubble" for IARA to live in. Open your Terminal (or Anaconda Prompt) and type this line carefully, exactly as written, then press Enter:
 ```bash
-conda create -n iara_env python=3.10 -y
+conda create -n iara_env python=3.11 -y
 ```
 
 Now, tell your computer to step *inside* that new bubble:
@@ -47,7 +47,7 @@ conda activate iara_env
 
 Finally, let's install the actual math and biology engines. Copy this line, paste it in the terminal, and press Enter (this will take a minute or two):
 ```bash
-pip install torch torch-geometric prody pandas scipy
+pip install torch torch-geometric gemmi scipy
 ```
 **Congratulations!** The hard computational part is over. You never have to type those setup commands again.
 
@@ -129,6 +129,14 @@ If you ran the command-line script from Step 4 and got back a `_IARA.pdb` file, 
 ## 💻 Quick Start (For Experienced Users)
 
 ### CLI Installation & Usage
+
+```bash
+uv tool install git+https://github.com/lkndl/IARA
+iara --input target.pdb
+```
+This puts the `iara` command on your `PATH` (in `~/.local/bin`), in an environment of its own. Pin a release with `@<tag>` after the URL.
+
+Or, from a clone:
 
 ```bash
 git clone https://github.com/leodeals/IARA
@@ -238,13 +246,14 @@ structure once and colour it by any number of tracks. Residue numbering is
 ```json
 {
   "schema_version": 1,
-  "id": "iara-target",
+  "id": "iara-interface",
   "label": "IARA interface score",
   "index": "auth",
   "scale": { "kind": "sequential", "domain": [0.0, 100.0] },
+  "palette": { "name": "purples" },
   "provenance": {
     "tool": "iara",
-    "tool_version": "0.1.0",
+    "tool_version": "0.2.0",
     "created": "2026-10-24T14:02:11Z",
     "source_structure": "target.pdb",
     "parameters": { "edge_distance_threshold_A": 10.0, "smoothing_radius_A": 8.0 }
@@ -258,7 +267,14 @@ structure once and colour it by any number of tracks. Residue numbering is
 
 Only residues with a scored C-alpha appear; unscored residues are omitted rather
 than written as `0`. The `domain` is the fixed `0–100` IARA range, not the
-observed range, so tracks from different structures stay comparable.
+observed range, and the `id` is the same for every structure, so tracks from
+different structures stay comparable.
+
+The other outputs name residues by author chain and number too, for mmCIF input
+as well.
+
+`iara` carries on past a structure it cannot score, and exits with status 1 at
+the end if any failed.
 
 ### Score Interpretation Guidelines
 

@@ -1,12 +1,12 @@
 [project]
 name = "iara"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Interface Analysis and Recognition Architecture - GNN scoring of protein interaction hotspots"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "pandas>=3.1.0",
-    "prody>=2.6.1",
+    "gemmi>=0.7.3",
+    "numpy>=2.0",
     "scipy>=1.17.1",
     "torch>=2.14.1",
     "torch-geometric>=2.8.1",
@@ -15,9 +15,19 @@ dependencies = [
 [project.scripts]
 iara = "iara.predict:main"
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+# The version comes from the git tags, see docs/development.md
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.0.0"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/iara"]
