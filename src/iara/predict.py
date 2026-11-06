@@ -4,6 +4,8 @@ import glob
 import argparse
 import warnings
 import json
+import gzip
+import hashlib
 import torch
 import torch.nn as nn
 import numpy as np
@@ -176,11 +178,21 @@ def write_scored_structure(struct, residues, probs, out_path):
         struct.shorten_chain_names()
     struct.write_pdb(out_path)
 
+def sha1sum(input_file):
+    """The SHA-1 of the file's bytes as sha1sum prints it, of the uncompressed bytes for a gzipped file."""
+    with open(input_file, "rb") as f:
+        gzipped = f.read(2) == b"\x1f\x8b"
+    digest = hashlib.sha1()
+    with (gzip.open if gzipped else open)(input_file, "rb") as f:
+        while chunk := f.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
+
 def write_score_track(input_file, residues, probs, output_dir):
     """
     Writes a residue score track: one IARA score per residue, kept separate from
     the coordinates, following the af-molstar-viewer residue-score-track schema
-    (version 1). Returns the path written.
+    (version 2). Returns the path written.
     """
     try:
         from importlib.metadata import version
@@ -198,16 +210,17 @@ def write_score_track(input_file, residues, probs, output_dir):
             dupes += 1
             continue
         seen.add(key)
-        entry = {"chain": key[0], "seq": key[1], "value": round(float(p) * 100.0, 1)}
+        entry = {"chain": key[0], "idx": key[1], "res_name": r.resname}
         if key[2]:
             entry["ins_code"] = key[2]
+        entry["value"] = round(float(p) * 100.0, 1)
         values.append(entry)
 
     if dupes:
         print(f"   \u26a0\ufe0f  Dropped {dupes} duplicate residue(s) from the score track of {file_path.name}.")
 
     track = {
-        "schema_version": 1,
+        "schema_version": 2,
         "id": TRACK_ID,
         "label": "IARA interface score",
         "index": "auth",
@@ -218,6 +231,7 @@ def write_score_track(input_file, residues, probs, output_dir):
             "tool_version": tool_version,
             "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "source_structure": file_path.name,
+            "source_sha1sum": sha1sum(input_file),
             "parameters": {"edge_distance_threshold_A": EDGE_DISTANCE_A, "smoothing_radius_A": SMOOTHING_RADIUS_A},
         },
         "values": values,
@@ -356,7 +370,7 @@ def main():
     parser.add_argument("-o", "--outdir", default=None, help="Output directory to save scored PDBs (default: same folder as input)")
     parser.add_argument("-m", "--model", default=_DEFAULT_MODEL, help=f"Path to IARA.pth weights (default: {_DEFAULT_MODEL})")
     parser.add_argument("-e", "--extensive", action="store_true", help="Generate extensive outputs: grouping hot residues into patches and saving as JSON and TXT")
-    parser.add_argument("-j", "--json-track", action="store_true", help="Generate a residue score track JSON (af-molstar-viewer schema v1) as <name>_IARA_track.json")
+    parser.add_argument("-j", "--json-track", action="store_true", help="Generate a residue score track JSON (af-molstar-viewer schema v2) as <name>_IARA_track.json")
     parser.add_argument("-t", "--threshold", type=float, default=60.0, help="IARA score threshold for a residue to be considered hot (default: 60)")
     parser.add_argument("-d", "--distance", type=float, default=5.0, help="Maximum CA-CA distance (in A) to group residues into the same patch (default: 5.0)")
     parser.add_argument("-s", "--min-size", type=int, default=3, help="Minimum number of residues required to form a patch (default: 3)")

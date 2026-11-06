@@ -240,14 +240,14 @@ When using `-e`, connected hot residues are clustered into discrete spatial patc
 ```
 
 ### 4. `target_IARA_track.json` (Residue Score Track, `-j`)
-A residue score track following the af-molstar-viewer schema (version 1): one
+A residue score track following the af-molstar-viewer schema (version 2): one
 score per residue, kept separate from the coordinates so the viewer can load the
 structure once and colour it by any number of tracks. Residue numbering is
 **author numbering** (`auth_asym_id` / `auth_seq_id`), as declared by `"index"`.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "iara-interface",
   "label": "IARA interface score",
   "index": "auth",
@@ -258,11 +258,12 @@ structure once and colour it by any number of tracks. Residue numbering is
     "tool_version": "0.2.0",
     "created": "2026-10-24T14:02:11Z",
     "source_structure": "target.pdb",
+    "source_sha1sum": "4a1f0c2e9b7d3e8f5a6c1b2d3e4f5a6b7c8d9e0f",
     "parameters": { "edge_distance_threshold_A": 10.0, "smoothing_radius_A": 8.0 }
   },
   "values": [
-    { "chain": "A", "seq": 12, "value": 84.6 },
-    { "chain": "A", "seq": 13, "value": 91.2 }
+    { "chain": "A", "idx": 12, "res_name": "LYS", "value": 84.6 },
+    { "chain": "A", "idx": 13, "res_name": "TYR", "value": 91.2 }
   ]
 }
 ```
@@ -271,6 +272,10 @@ Only residues with a scored C-alpha appear; unscored residues are omitted rather
 than written as `0`. The `domain` is the fixed `0–100` IARA range, not the
 observed range, and the `id` is the same for every structure, so tracks from
 different structures stay comparable.
+
+`res_name` is the residue name as the input file has it, and `source_sha1sum`
+the SHA-1 of the input file, of its uncompressed bytes for a `.gz`. With them
+the viewer checks that a track belongs to the structure it is loaded on.
 
 The other outputs name residues by author chain and number too, for mmCIF input
 as well.

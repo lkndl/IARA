@@ -26,9 +26,12 @@ written with gemmi from the full entry, with only the `atom_site`, `entity`,
 
 gemmi names chains and residues by author ID (`auth_asym_id`, `auth_seq_id`) in
 both PDB and mmCIF, which is what the score track declares with
-`"index": "auth"`. ProDy, used before, put the label chain ID into the chain of
-mmCIF input, had no wheel for Python 3.13 (so it compiled on every install,
-which on Windows needs the MSVC Build Tools), and capped `pyparsing<=3.1.1`.
+`"index": "auth"`. The residue name, the track's `res_name`, is
+`auth_comp_id` where an mmCIF file has that column and `label_comp_id`
+otherwise; the two agree in wwPDB files. ProDy, used before, put the label
+chain ID into the chain of mmCIF input, had no wheel for Python 3.13 (so it
+compiled on every install, which on Windows needs the MSVC Build Tools), and
+capped `pyparsing<=3.1.1`.
 
 ## Versions come from git tags
 
